@@ -1,3 +1,13 @@
+**2.47.0** (27 Apr 2023)
+- Collect richer marketing attribution properties for multi-touch attribution
+- New implementation of previously-deprecated track_pageview() method and init option to send automatically
+- Use performance.now when available for time-based entropy component of UUID-generation (thanks @adrianherd)
+- looser API Host check for default JSON-payload sending to mipxanel.com hosts
+
+**2.46.0** (20 Mar 2023)
+- Updates for new identity management system
+- More aggressive deduplication within batch sender
+
 **2.45.0** (17 Feb 2022)
 - Remove all code related to in-app messaging feature
 - Add `error_reporter` config option for user-configurable handling of errors

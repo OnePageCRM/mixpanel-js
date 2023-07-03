@@ -69,7 +69,7 @@
 
 	    var Config = {
 	        DEBUG: false,
-	        LIB_VERSION: '2.45.0'
+	        LIB_VERSION: '2.47.0'
 	    };
 
 	    // since es6 imports are static and we run unit tests from the console, window won't be defined when importing this file
@@ -899,20 +899,24 @@
 
 	    _.UUID = (function() {
 
-	        // Time/ticks information
-	        // 1*new Date() is a cross browser version of Date.now()
+	        // Time-based entropy
 	        var T = function() {
-	            var d = 1 * new Date(),
-	                i = 0;
+	            var time = 1 * new Date(); // cross-browser version of Date.now()
+	            var ticks;
+	            if (window$1.performance && window$1.performance.now) {
+	                ticks = window$1.performance.now();
+	            } else {
+	                // fall back to busy loop
+	                ticks = 0;
 
-	            // this while loop figures how many browser ticks go by
-	            // before 1*new Date() returns a new number, ie the amount
-	            // of ticks that go by per millisecond
-	            while (d == 1 * new Date()) {
-	                i++;
+	                // this while loop figures how many browser ticks go by
+	                // before 1*new Date() returns a new number, ie the amount
+	                // of ticks that go by per millisecond
+	                while (time == 1 * new Date()) {
+	                    ticks++;
+	                }
 	            }
-
-	            return d.toString(16) + i.toString(16);
+	            return time.toString(16) + Math.floor(ticks).toString(16);
 	        };
 
 	        // Math.Random entropy
@@ -1479,19 +1483,40 @@
 	        };
 	    })();
 
+	    var CAMPAIGN_KEYWORDS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+	    var CLICK_IDS = ['dclid', 'fbclid', 'gclid', 'ko_click_id', 'li_fat_id', 'msclkid', 'ttclid', 'twclid', 'wbraid'];
+
 	    _.info = {
-	        campaignParams: function() {
-	            var campaign_keywords = 'utm_source utm_medium utm_campaign utm_content utm_term'.split(' '),
-	                kw = '',
+	        campaignParams: function(default_value) {
+	            var kw = '',
 	                params = {};
-	            _.each(campaign_keywords, function(kwkey) {
+	            _.each(CAMPAIGN_KEYWORDS, function(kwkey) {
 	                kw = _.getQueryParam(document$1.URL, kwkey);
 	                if (kw.length) {
 	                    params[kwkey] = kw;
+	                } else if (default_value !== undefined) {
+	                    params[kwkey] = default_value;
 	                }
 	            });
 
 	            return params;
+	        },
+
+	        clickParams: function() {
+	            var id = '',
+	                params = {};
+	            _.each(CLICK_IDS, function(idkey) {
+	                id = _.getQueryParam(document$1.URL, idkey);
+	                if (id.length) {
+	                    params[idkey] = id;
+	                }
+	            });
+
+	            return params;
+	        },
+
+	        marketingParams: function() {
+	            return _.extend(_.info.campaignParams(), _.info.clickParams());
 	        },
 
 	        searchEngine: function(referrer) {
@@ -1690,12 +1715,13 @@
 	            });
 	        },
 
-	        pageviewInfo: function(page) {
+	        mpPageViewProperties: function() {
 	            return _.strip_empty_properties({
-	                'mp_page': page,
-	                'mp_referrer': document$1.referrer,
-	                'mp_browser': _.info.browser(userAgent, navigator.vendor, windowOpera),
-	                'mp_platform': _.info.os()
+	                'current_page_title': document$1.title,
+	                'current_domain': window$1.location.hostname,
+	                'current_url_path': window$1.location.pathname,
+	                'current_url_protocol': window$1.location.protocol,
+	                'current_url_search': window$1.location.search
 	            });
 	        }
 	    };
@@ -2362,6 +2388,9 @@
 
 	        this.stopped = !this.libConfig['batch_autostart'];
 	        this.consecutiveRemovalFailures = 0;
+
+	        // extra client-side dedupe
+	        this.itemIdsSentSuccessfully = {};
 	    };
 
 	    /**
@@ -2454,7 +2483,34 @@
 	                    payload = this.beforeSendHook(payload);
 	                }
 	                if (payload) {
-	                    dataForRequest.push(payload);
+	                    // mp_sent_by_lib_version prop captures which lib version actually
+	                    // sends each event (regardless of which version originally queued
+	                    // it for sending)
+	                    if (payload['event'] && payload['properties']) {
+	                        payload['properties'] = _.extend(
+	                            {},
+	                            payload['properties'],
+	                            {'mp_sent_by_lib_version': Config.LIB_VERSION}
+	                        );
+	                    }
+	                    var addPayload = true;
+	                    var itemId = item['id'];
+	                    if (itemId) {
+	                        if ((this.itemIdsSentSuccessfully[itemId] || 0) > 5) {
+	                            this.reportError('[dupe] item ID sent too many times, not sending', {
+	                                item: item,
+	                                batchSize: batch.length,
+	                                timesSent: this.itemIdsSentSuccessfully[itemId]
+	                            });
+	                            addPayload = false;
+	                        }
+	                    } else {
+	                        this.reportError('[dupe] found item with no ID', {item: item});
+	                    }
+
+	                    if (addPayload) {
+	                        dataForRequest.push(payload);
+	                    }
 	                }
 	                transformedItems[item['id']] = payload;
 	            }, this);
@@ -2537,6 +2593,24 @@
 	                                }
 	                            }, this)
 	                        );
+
+	                        // client-side dedupe
+	                        _.each(batch, _.bind(function(item) {
+	                            var itemId = item['id'];
+	                            if (itemId) {
+	                                this.itemIdsSentSuccessfully[itemId] = this.itemIdsSentSuccessfully[itemId] || 0;
+	                                this.itemIdsSentSuccessfully[itemId]++;
+	                                if (this.itemIdsSentSuccessfully[itemId] > 5) {
+	                                    this.reportError('[dupe] item ID sent too many times', {
+	                                        item: item,
+	                                        batchSize: batch.length,
+	                                        timesSent: this.itemIdsSentSuccessfully[itemId]
+	                                    });
+	                                }
+	                            } else {
+	                                this.reportError('[dupe] found item with no ID while removing', {item: item});
+	                            }
+	                        }, this));
 	                    }
 
 	                } catch(err) {
@@ -3382,24 +3456,25 @@
 	    });
 
 	    /*
-	    * Record that you have charged the current user a certain amount
-	    * of money. Charges recorded with track_charge() will appear in the
-	    * Mixpanel revenue report.
-	    *
-	    * ### Usage:
-	    *
-	    *     // charge a user $50
-	    *     mixpanel.people.track_charge(50);
-	    *
-	    *     // charge a user $30.50 on the 2nd of january
-	    *     mixpanel.people.track_charge(30.50, {
-	    *         '$time': new Date('jan 1 2012')
-	    *     });
-	    *
-	    * @param {Number} amount The amount of money charged to the current user
-	    * @param {Object} [properties] An associative array of properties associated with the charge
-	    * @param {Function} [callback] If provided, the callback will be called when the server responds
-	    */
+	     * Record that you have charged the current user a certain amount
+	     * of money. Charges recorded with track_charge() will appear in the
+	     * Mixpanel revenue report.
+	     *
+	     * ### Usage:
+	     *
+	     *     // charge a user $50
+	     *     mixpanel.people.track_charge(50);
+	     *
+	     *     // charge a user $30.50 on the 2nd of january
+	     *     mixpanel.people.track_charge(30.50, {
+	     *         '$time': new Date('jan 1 2012')
+	     *     });
+	     *
+	     * @param {Number} amount The amount of money charged to the current user
+	     * @param {Object} [properties] An associative array of properties associated with the charge
+	     * @param {Function} [callback] If provided, the callback will be called when the server responds
+	     * @deprecated
+	     */
 	    MixpanelPeople.prototype.track_charge = addOptOutCheckMixpanelPeople(function(amount, properties, callback) {
 	        if (!_.isNumber(amount)) {
 	            amount = parseFloat(amount);
@@ -3415,15 +3490,16 @@
 	    });
 
 	    /*
-	    * Permanently clear all revenue report transactions from the
-	    * current user's people analytics profile.
-	    *
-	    * ### Usage:
-	    *
-	    *     mixpanel.people.clear_charges();
-	    *
-	    * @param {Function} [callback] If provided, the callback will be called after tracking the event.
-	    */
+	     * Permanently clear all revenue report transactions from the
+	     * current user's people analytics profile.
+	     *
+	     * ### Usage:
+	     *
+	     *     mixpanel.people.clear_charges();
+	     *
+	     * @param {Function} [callback] If provided, the callback will be called after tracking the event.
+	     * @deprecated
+	     */
 	    MixpanelPeople.prototype.clear_charges = function(callback) {
 	        return this.set('$transactions', [], callback);
 	    };
@@ -3823,13 +3899,6 @@
 	        }
 	    };
 
-	    MixpanelPersistence.prototype.update_campaign_params = function() {
-	        if (!this.campaign_params_saved) {
-	            this.register_once(_.info.campaignParams());
-	            this.campaign_params_saved = true;
-	        }
-	    };
-
 	    MixpanelPersistence.prototype.update_search_keyword = function(referrer) {
 	        this.register(_.info.searchInfo(referrer));
 	    };
@@ -4112,6 +4181,7 @@
 	    /** @const */ var PRIMARY_INSTANCE_NAME = 'mixpanel';
 	    /** @const */ var PAYLOAD_TYPE_BASE64   = 'base64';
 	    /** @const */ var PAYLOAD_TYPE_JSON     = 'json';
+	    /** @const */ var DEVICE_ID_PREFIX      = '$device:';
 
 
 	    /*
@@ -4153,6 +4223,9 @@
 	        'cookie_domain':                     '',
 	        'cookie_name':                       '',
 	        'loaded':                            NOOP_FUNC,
+	        'track_marketing':                   true,
+	        'track_pageview':                    false,
+	        'skip_first_touch_marketing':        false,
 	        'store_google':                      true,
 	        'save_referrer':                     true,
 	        'test':                              false,
@@ -4219,6 +4292,25 @@
 	        instance['people'] = new MixpanelPeople();
 	        instance['people']._init(instance);
 
+	        if (!instance.get_config('skip_first_touch_marketing')) {
+	            // We need null UTM params in the object because
+	            // UTM parameters act as a tuple. If any UTM param
+	            // is present, then we set all UTM params including
+	            // empty ones together
+	            var utm_params = _.info.campaignParams(null);
+	            var initial_utm_params = {};
+	            var has_utm = false;
+	            _.each(utm_params, function(utm_value, utm_key) {
+	                initial_utm_params['initial_' + utm_key] = utm_value;
+	                if (utm_value) {
+	                    has_utm = true;
+	                }
+	            });
+	            if (has_utm) {
+	                instance['people'].set_once(initial_utm_params);
+	            }
+	        }
+
 	        // if any instance on the page has debug = true, we set the
 	        // global debug to be true
 	        Config.DEBUG = Config.DEBUG || instance.get_config('debug');
@@ -4250,7 +4342,7 @@
 	     *     mixpanel.library_name.track(...);
 	     *
 	     * @param {String} token   Your Mixpanel API token
-	     * @param {Object} [config]  A dictionary of config options to override. <a href="https://github.com/mixpanel/mixpanel-js/blob/8b2e1f7b/src/mixpanel-core.js#L87-L110">See a list of default config options</a>.
+	     * @param {Object} [config]  A dictionary of config options to override. <a href="https://github.com/mixpanel/mixpanel-js/blob/v2.46.0/src/mixpanel-core.js#L88-L127">See a list of default config options</a>.
 	     * @param {String} [name]    The name for the new mixpanel instance that you want created
 	     */
 	    MixpanelLib.prototype.init = function (token, config, name) {
@@ -4288,7 +4380,7 @@
 	        // default to JSON payload for standard mixpanel.com API hosts
 	        if (!('api_payload_format' in config)) {
 	            var api_host = config['api_host'] || DEFAULT_CONFIG['api_host'];
-	            if (api_host.match(/\.mixpanel\.com$/)) {
+	            if (api_host.match(/\.mixpanel\.com/)) {
 	                variable_features['api_payload_format'] = PAYLOAD_TYPE_JSON;
 	            }
 	        }
@@ -4359,9 +4451,13 @@
 	            // or the device id if something was already stored
 	            // in the persitence
 	            this.register_once({
-	                'distinct_id': uuid,
+	                'distinct_id': DEVICE_ID_PREFIX + uuid,
 	                '$device_id': uuid
 	            }, '');
+	        }
+
+	        if (this.get_config('track_pageview')) {
+	            this.track_pageview();
 	        }
 	    };
 
@@ -4376,7 +4472,7 @@
 	    MixpanelLib.prototype._set_default_superprops = function() {
 	        this['persistence'].update_search_keyword(document$1.referrer);
 	        if (this.get_config('store_google')) {
-	            this['persistence'].update_campaign_params();
+	            this.register(_.info.campaignParams(), {persistent: false});
 	        }
 	        if (this.get_config('save_referrer')) {
 	            this['persistence'].update_referrer_info(document$1.referrer);
@@ -4858,6 +4954,10 @@
 
 	        this._set_default_superprops();
 
+	        var marketing_properties = this.get_config('track_marketing')
+	            ? _.info.marketingParams()
+	            : {};
+
 	        // note: extend writes to the first object, so lets make sure we
 	        // don't write to the persistence properties object and info
 	        // properties object by passing in a new object
@@ -4866,6 +4966,7 @@
 	        properties = _.extend(
 	            {},
 	            _.info.properties(),
+	            marketing_properties,
 	            this['persistence'].properties(),
 	            this.unpersisted_superprops,
 	            properties
@@ -5026,17 +5127,54 @@
 	    };
 
 	    /**
-	     * Track mp_page_view event. This is now ignored by the server.
+	     * Track a default Mixpanel page view event, which includes extra default event properties to
+	     * improve page view data. The `config.track_pageview` option for <a href="#mixpanelinit">mixpanel.init()</a>
+	     * may be turned on for tracking page loads automatically.
 	     *
-	     * @param {String} [page] The url of the page to record. If you don't include this, it defaults to the current url.
-	     * @deprecated
+	     * ### Usage
+	     *
+	     *     // track a default $mp_web_page_view event
+	     *     mixpanel.track_pageview();
+	     *
+	     *     // track a page view event with additional event properties
+	     *     mixpanel.track_pageview({'ab_test_variant': 'card-layout-b'});
+	     *
+	     *     // example approach to track page views on different page types as event properties
+	     *     mixpanel.track_pageview({'page': 'pricing'});
+	     *     mixpanel.track_pageview({'page': 'homepage'});
+	     *
+	     *     // UNCOMMON: Tracking a page view event with a custom event_name option. NOT expected to be used for
+	     *     // individual pages on the same site or product. Use cases for custom event_name may be page
+	     *     // views on different products or internal applications that are considered completely separate
+	     *     mixpanel.track_pageview({'page': 'customer-search'}, {'event_name': '[internal] Admin Page View'});
+	     *
+	     * @param {Object} [properties] An optional set of additional properties to send with the page view event
+	     * @param {Object} [options] Page view tracking options
+	     * @param {String} [options.event_name] - Alternate name for the tracking event
+	     * @returns {Boolean|Object} If the tracking request was successfully initiated/queued, an object
+	     * with the tracking payload sent to the API server is returned; otherwise false.
 	     */
-	    MixpanelLib.prototype.track_pageview = function(page) {
-	        if (_.isUndefined(page)) {
-	            page = document$1.location.href;
+	    MixpanelLib.prototype.track_pageview = addOptOutCheckMixpanelLib(function(properties, options) {
+	        if (typeof properties !== 'object') {
+	            properties = {};
 	        }
-	        this.track('mp_page_view', _.info.pageviewInfo(page));
-	    };
+	        options = options || {};
+	        var event_name = options['event_name'] || '$mp_web_page_view';
+
+	        var default_page_properties = _.extend(
+	            _.info.mpPageViewProperties(),
+	            _.info.campaignParams(),
+	            _.info.clickParams()
+	        );
+
+	        var event_properties = _.extend(
+	            {},
+	            default_page_properties,
+	            properties
+	        );
+
+	        return this.track(event_name, event_properties);
+	    });
 
 	    /**
 	     * Track clicks on a set of document elements. Selector must be a
@@ -5285,7 +5423,15 @@
 	        //  _unset_callback:function  A callback to be run if and when the People unset queue is flushed
 
 	        var previous_distinct_id = this.get_distinct_id();
-	        this.register({'$user_id': new_distinct_id});
+	        if (new_distinct_id && previous_distinct_id !== new_distinct_id) {
+	            // we allow the following condition if previous distinct_id is same as new_distinct_id
+	            // so that you can force flush people updates for anonymous profiles.
+	            if (typeof new_distinct_id === 'string' && new_distinct_id.indexOf(DEVICE_ID_PREFIX) === 0) {
+	                this.report_error('distinct_id cannot have $device: prefix');
+	                return -1;
+	            }
+	            this.register({'$user_id': new_distinct_id});
+	        }
 
 	        if (!this.get_property('$device_id')) {
 	            // The persisted distinct id might not actually be a device id at all
@@ -5326,7 +5472,7 @@
 	        this._flags.identify_called = false;
 	        var uuid = _.UUID();
 	        this.register_once({
-	            'distinct_id': uuid,
+	            'distinct_id': DEVICE_ID_PREFIX + uuid,
 	            '$device_id': uuid
 	        }, '');
 	    };
@@ -5451,8 +5597,8 @@
 	     *       // batching or retry mechanisms.
 	     *       api_transport: 'XHR'
 	     *
-	     *       // turn on request-batching/queueing/retry
-	     *       batch_requests: false,
+	     *       // request-batching/queueing/retry
+	     *       batch_requests: true,
 	     *
 	     *       // maximum number of events/updates to send in a single
 	     *       // network request
@@ -5524,9 +5670,19 @@
 	     *       // secure, meaning they will only be transmitted over https
 	     *       secure_cookie: false
 	     *
+	     *       // disables enriching user profiles with first touch marketing data
+	     *       skip_first_touch_marketing: false
+	     *
 	     *       // the amount of time track_links will
 	     *       // wait for Mixpanel's servers to respond
 	     *       track_links_timeout: 300
+	     *
+	     *       // adds any UTM parameters and click IDs present on the page to any events fired
+	     *       track_marketing: true
+	     *
+	     *       // enables automatic page view tracking using default page view events through
+	     *       // the track_pageview() method
+	     *       track_pageview: false
 	     *
 	     *       // if you set upgrade to be true, the library will check for
 	     *       // a cookie from our old js library and import super

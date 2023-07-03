@@ -57,6 +57,7 @@ var NOOP_FUNC = function() {};
 /** @const */ var PRIMARY_INSTANCE_NAME = 'mixpanel';
 /** @const */ var PAYLOAD_TYPE_BASE64   = 'base64';
 /** @const */ var PAYLOAD_TYPE_JSON     = 'json';
+/** @const */ var DEVICE_ID_PREFIX      = '$device:';
 
 
 /*
@@ -98,6 +99,9 @@ var DEFAULT_CONFIG = {
     'cookie_domain':                     '',
     'cookie_name':                       '',
     'loaded':                            NOOP_FUNC,
+    'track_marketing':                   true,
+    'track_pageview':                    false,
+    'skip_first_touch_marketing':        false,
     'store_google':                      true,
     'save_referrer':                     true,
     'test':                              false,
@@ -164,6 +168,25 @@ var create_mplib = function(token, config, name) {
     instance['people'] = new MixpanelPeople();
     instance['people']._init(instance);
 
+    if (!instance.get_config('skip_first_touch_marketing')) {
+        // We need null UTM params in the object because
+        // UTM parameters act as a tuple. If any UTM param
+        // is present, then we set all UTM params including
+        // empty ones together
+        var utm_params = _.info.campaignParams(null);
+        var initial_utm_params = {};
+        var has_utm = false;
+        _.each(utm_params, function(utm_value, utm_key) {
+            initial_utm_params['initial_' + utm_key] = utm_value;
+            if (utm_value) {
+                has_utm = true;
+            }
+        });
+        if (has_utm) {
+            instance['people'].set_once(initial_utm_params);
+        }
+    }
+
     // if any instance on the page has debug = true, we set the
     // global debug to be true
     Config.DEBUG = Config.DEBUG || instance.get_config('debug');
@@ -195,7 +218,7 @@ var create_mplib = function(token, config, name) {
  *     mixpanel.library_name.track(...);
  *
  * @param {String} token   Your Mixpanel API token
- * @param {Object} [config]  A dictionary of config options to override. <a href="https://github.com/mixpanel/mixpanel-js/blob/8b2e1f7b/src/mixpanel-core.js#L87-L110">See a list of default config options</a>.
+ * @param {Object} [config]  A dictionary of config options to override. <a href="https://github.com/mixpanel/mixpanel-js/blob/v2.46.0/src/mixpanel-core.js#L88-L127">See a list of default config options</a>.
  * @param {String} [name]    The name for the new mixpanel instance that you want created
  */
 MixpanelLib.prototype.init = function (token, config, name) {
@@ -233,7 +256,7 @@ MixpanelLib.prototype._init = function(token, config, name) {
     // default to JSON payload for standard mixpanel.com API hosts
     if (!('api_payload_format' in config)) {
         var api_host = config['api_host'] || DEFAULT_CONFIG['api_host'];
-        if (api_host.match(/\.mixpanel\.com$/)) {
+        if (api_host.match(/\.mixpanel\.com/)) {
             variable_features['api_payload_format'] = PAYLOAD_TYPE_JSON;
         }
     }
@@ -304,9 +327,13 @@ MixpanelLib.prototype._init = function(token, config, name) {
         // or the device id if something was already stored
         // in the persitence
         this.register_once({
-            'distinct_id': uuid,
+            'distinct_id': DEVICE_ID_PREFIX + uuid,
             '$device_id': uuid
         }, '');
+    }
+
+    if (this.get_config('track_pageview')) {
+        this.track_pageview();
     }
 };
 
@@ -321,7 +348,7 @@ MixpanelLib.prototype._loaded = function() {
 MixpanelLib.prototype._set_default_superprops = function() {
     this['persistence'].update_search_keyword(document.referrer);
     if (this.get_config('store_google')) {
-        this['persistence'].update_campaign_params();
+        this.register(_.info.campaignParams(), {persistent: false});
     }
     if (this.get_config('save_referrer')) {
         this['persistence'].update_referrer_info(document.referrer);
@@ -803,6 +830,10 @@ MixpanelLib.prototype.track = addOptOutCheckMixpanelLib(function(event_name, pro
 
     this._set_default_superprops();
 
+    var marketing_properties = this.get_config('track_marketing')
+        ? _.info.marketingParams()
+        : {};
+
     // note: extend writes to the first object, so lets make sure we
     // don't write to the persistence properties object and info
     // properties object by passing in a new object
@@ -811,6 +842,7 @@ MixpanelLib.prototype.track = addOptOutCheckMixpanelLib(function(event_name, pro
     properties = _.extend(
         {},
         _.info.properties(),
+        marketing_properties,
         this['persistence'].properties(),
         this.unpersisted_superprops,
         properties
@@ -971,17 +1003,54 @@ MixpanelLib.prototype.get_group = function (group_key, group_id) {
 };
 
 /**
- * Track mp_page_view event. This is now ignored by the server.
+ * Track a default Mixpanel page view event, which includes extra default event properties to
+ * improve page view data. The `config.track_pageview` option for <a href="#mixpanelinit">mixpanel.init()</a>
+ * may be turned on for tracking page loads automatically.
  *
- * @param {String} [page] The url of the page to record. If you don't include this, it defaults to the current url.
- * @deprecated
+ * ### Usage
+ *
+ *     // track a default $mp_web_page_view event
+ *     mixpanel.track_pageview();
+ *
+ *     // track a page view event with additional event properties
+ *     mixpanel.track_pageview({'ab_test_variant': 'card-layout-b'});
+ *
+ *     // example approach to track page views on different page types as event properties
+ *     mixpanel.track_pageview({'page': 'pricing'});
+ *     mixpanel.track_pageview({'page': 'homepage'});
+ *
+ *     // UNCOMMON: Tracking a page view event with a custom event_name option. NOT expected to be used for
+ *     // individual pages on the same site or product. Use cases for custom event_name may be page
+ *     // views on different products or internal applications that are considered completely separate
+ *     mixpanel.track_pageview({'page': 'customer-search'}, {'event_name': '[internal] Admin Page View'});
+ *
+ * @param {Object} [properties] An optional set of additional properties to send with the page view event
+ * @param {Object} [options] Page view tracking options
+ * @param {String} [options.event_name] - Alternate name for the tracking event
+ * @returns {Boolean|Object} If the tracking request was successfully initiated/queued, an object
+ * with the tracking payload sent to the API server is returned; otherwise false.
  */
-MixpanelLib.prototype.track_pageview = function(page) {
-    if (_.isUndefined(page)) {
-        page = document.location.href;
+MixpanelLib.prototype.track_pageview = addOptOutCheckMixpanelLib(function(properties, options) {
+    if (typeof properties !== 'object') {
+        properties = {};
     }
-    this.track('mp_page_view', _.info.pageviewInfo(page));
-};
+    options = options || {};
+    var event_name = options['event_name'] || '$mp_web_page_view';
+
+    var default_page_properties = _.extend(
+        _.info.mpPageViewProperties(),
+        _.info.campaignParams(),
+        _.info.clickParams()
+    );
+
+    var event_properties = _.extend(
+        {},
+        default_page_properties,
+        properties
+    );
+
+    return this.track(event_name, event_properties);
+});
 
 /**
  * Track clicks on a set of document elements. Selector must be a
@@ -1230,7 +1299,15 @@ MixpanelLib.prototype.identify = function(
     //  _unset_callback:function  A callback to be run if and when the People unset queue is flushed
 
     var previous_distinct_id = this.get_distinct_id();
-    this.register({'$user_id': new_distinct_id});
+    if (new_distinct_id && previous_distinct_id !== new_distinct_id) {
+        // we allow the following condition if previous distinct_id is same as new_distinct_id
+        // so that you can force flush people updates for anonymous profiles.
+        if (typeof new_distinct_id === 'string' && new_distinct_id.indexOf(DEVICE_ID_PREFIX) === 0) {
+            this.report_error('distinct_id cannot have $device: prefix');
+            return -1;
+        }
+        this.register({'$user_id': new_distinct_id});
+    }
 
     if (!this.get_property('$device_id')) {
         // The persisted distinct id might not actually be a device id at all
@@ -1271,7 +1348,7 @@ MixpanelLib.prototype.reset = function() {
     this._flags.identify_called = false;
     var uuid = _.UUID();
     this.register_once({
-        'distinct_id': uuid,
+        'distinct_id': DEVICE_ID_PREFIX + uuid,
         '$device_id': uuid
     }, '');
 };
@@ -1396,8 +1473,8 @@ MixpanelLib.prototype.name_tag = function(name_tag) {
  *       // batching or retry mechanisms.
  *       api_transport: 'XHR'
  *
- *       // turn on request-batching/queueing/retry
- *       batch_requests: false,
+ *       // request-batching/queueing/retry
+ *       batch_requests: true,
  *
  *       // maximum number of events/updates to send in a single
  *       // network request
@@ -1469,9 +1546,19 @@ MixpanelLib.prototype.name_tag = function(name_tag) {
  *       // secure, meaning they will only be transmitted over https
  *       secure_cookie: false
  *
+ *       // disables enriching user profiles with first touch marketing data
+ *       skip_first_touch_marketing: false
+ *
  *       // the amount of time track_links will
  *       // wait for Mixpanel's servers to respond
  *       track_links_timeout: 300
+ *
+ *       // adds any UTM parameters and click IDs present on the page to any events fired
+ *       track_marketing: true
+ *
+ *       // enables automatic page view tracking using default page view events through
+ *       // the track_pageview() method
+ *       track_pageview: false
  *
  *       // if you set upgrade to be true, the library will check for
  *       // a cookie from our old js library and import super

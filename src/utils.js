@@ -830,20 +830,24 @@ _.utf8Encode = function(string) {
 
 _.UUID = (function() {
 
-    // Time/ticks information
-    // 1*new Date() is a cross browser version of Date.now()
+    // Time-based entropy
     var T = function() {
-        var d = 1 * new Date(),
-            i = 0;
+        var time = 1 * new Date(); // cross-browser version of Date.now()
+        var ticks;
+        if (win.performance && win.performance.now) {
+            ticks = win.performance.now();
+        } else {
+            // fall back to busy loop
+            ticks = 0;
 
-        // this while loop figures how many browser ticks go by
-        // before 1*new Date() returns a new number, ie the amount
-        // of ticks that go by per millisecond
-        while (d == 1 * new Date()) {
-            i++;
+            // this while loop figures how many browser ticks go by
+            // before 1*new Date() returns a new number, ie the amount
+            // of ticks that go by per millisecond
+            while (time == 1 * new Date()) {
+                ticks++;
+            }
         }
-
-        return d.toString(16) + i.toString(16);
+        return time.toString(16) + Math.floor(ticks).toString(16);
     };
 
     // Math.Random entropy
@@ -1410,19 +1414,40 @@ _.dom_query = (function() {
     };
 })();
 
+var CAMPAIGN_KEYWORDS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+var CLICK_IDS = ['dclid', 'fbclid', 'gclid', 'ko_click_id', 'li_fat_id', 'msclkid', 'ttclid', 'twclid', 'wbraid'];
+
 _.info = {
-    campaignParams: function() {
-        var campaign_keywords = 'utm_source utm_medium utm_campaign utm_content utm_term'.split(' '),
-            kw = '',
+    campaignParams: function(default_value) {
+        var kw = '',
             params = {};
-        _.each(campaign_keywords, function(kwkey) {
+        _.each(CAMPAIGN_KEYWORDS, function(kwkey) {
             kw = _.getQueryParam(document.URL, kwkey);
             if (kw.length) {
                 params[kwkey] = kw;
+            } else if (default_value !== undefined) {
+                params[kwkey] = default_value;
             }
         });
 
         return params;
+    },
+
+    clickParams: function() {
+        var id = '',
+            params = {};
+        _.each(CLICK_IDS, function(idkey) {
+            id = _.getQueryParam(document.URL, idkey);
+            if (id.length) {
+                params[idkey] = id;
+            }
+        });
+
+        return params;
+    },
+
+    marketingParams: function() {
+        return _.extend(_.info.campaignParams(), _.info.clickParams());
     },
 
     searchEngine: function(referrer) {
@@ -1621,12 +1646,13 @@ _.info = {
         });
     },
 
-    pageviewInfo: function(page) {
+    mpPageViewProperties: function() {
         return _.strip_empty_properties({
-            'mp_page': page,
-            'mp_referrer': document.referrer,
-            'mp_browser': _.info.browser(userAgent, navigator.vendor, windowOpera),
-            'mp_platform': _.info.os()
+            'current_page_title': document.title,
+            'current_domain': win.location.hostname,
+            'current_url_path': win.location.pathname,
+            'current_url_protocol': win.location.protocol,
+            'current_url_search': win.location.search
         });
     }
 };
