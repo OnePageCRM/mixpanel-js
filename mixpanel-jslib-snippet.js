@@ -88,7 +88,7 @@ var MIXPANEL_LIB_URL = '//cdn.mxpnl.com/libs/mixpanel-2-latest.min.js';
 
         script = document.createElement("script");
         script.type = "text/javascript";
-        script.async = true;
+        script.defer = true;
 
         if (typeof MIXPANEL_CUSTOM_LIB_URL !== 'undefined') {
             script.src = MIXPANEL_CUSTOM_LIB_URL;
@@ -98,8 +98,10 @@ var MIXPANEL_LIB_URL = '//cdn.mxpnl.com/libs/mixpanel-2-latest.min.js';
             script.src = MIXPANEL_LIB_URL;
         }
 
-        first_script = document.getElementsByTagName("script")[0];
-        first_script.parentNode.insertBefore(script, first_script);
+        document.addEventListener("DOMContentLoaded", function (event) {
+            first_script = document.getElementsByTagName("script")[0];
+            first_script.parentNode.insertBefore(script, first_script);
+        });
     }
 // Pass in current Mixpanel object if it exists (for ppl like Optimizely)
 })(document, window['mixpanel'] || []);
